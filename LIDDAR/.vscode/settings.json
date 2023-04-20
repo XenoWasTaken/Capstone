@@ -1,0 +1,6 @@
+{
+    "githubPullRequests.ignoredPullRequestBranches": [
+        "master"
+    ],
+    "cmake.sourceDirectory": "${workspaceFolder}/hls_lfcd_lds_driver"
+}
