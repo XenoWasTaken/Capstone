@@ -6,7 +6,7 @@
 - model.joblib : SVM model used for classifying human sounds.  Medium success rate, very simple model.  Some areas of dead code left for TODO/improving later
 - test_data.txt : folds used for building model
   
-### Testing directories
+## Testing directories
 - ambient : short ambient sounds
 - voicelayer : human voice recordings over short ambient sounds
 - nonvoicelayer : nonvoice human sounds (coughing, breathing), over short ambient sounds
