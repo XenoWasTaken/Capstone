@@ -1,7 +1,7 @@
 #imports
 import math
 import numpy as np
-from matplotlib import pyplot as plt
+#from matplotlib import pyplot as plt
 import librosa
 import sys
 from scipy import signal
@@ -15,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 import random
 from joblib import dump, load
+import time
 #########################################
 # Filter and splitting
 
@@ -147,6 +148,8 @@ def compute_spectral_flux(fourier_curr, fourier_prev):
 # Data Driver
 def collect_data(wavname, ref_noise=0):
     sample_rate, wavdata = wav.read(wavname)
+    if wavdata.ndim > 1:
+        wavdata = np.mean(wavdata, axis=1)
     #filter the audio bandpass
     bandpass_wav = bandpass(wavdata, sample_rate)
     #Wiener filter
@@ -211,6 +214,12 @@ model = load('model.joblib')
 
 # Begin cycle
 while True:
-    #gather 5 seconds of audio, save to directory
-    reading_file = 1 #Replace with code to read 5 seconds of audio and save as file, filename goes here
-    model.predict(collect_data(reading_file))
+    os.system("arecord -D plughw:1 -c2 -r 44100 -f FLOAT_LE -t wav -V stereo --duration=5 -v a.wav")
+    time.sleep(2)
+    reading_file = "a.wav"
+    print(collect_data(reading_file))
+    if (model.predict(np.array(collect_data(reading_file)).reshape(1,-1)) == 1):
+        print("possible causalty")
+    else:
+        print("nada")
+    time.sleep(0.01)
