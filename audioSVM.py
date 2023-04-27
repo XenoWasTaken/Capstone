@@ -7,17 +7,32 @@ import sys
 from scipy import signal
 import scipy.io.wavfile as wav
 from scipy.fft import fft, ifft
-import contextlib
 import os
 import soundfile as sf
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
-import random
 from joblib import dump, load
 import time
+import math
+
+#########################################
+# Reading
+def mono_read(wavname):
+    sample_rate, wavdata = wav.read(wavname)
+    if wavdata.ndim > 1:
+        wavdata = np.mean(wavdata, axis=1)
+    return sample_rate, wavdata
 #########################################
 # Filter and splitting
+
+def decibel_calc(val):
+    return 20*math.log10(val)
+
+def average_decibel_calc(data):
+    volume = np.sqrt(np.mean(np.square(data)))
+    volume = 20*np.log10(volume)
+    return volume
 
 #Bandpass
 def bandpass(wavdata, sample_rate):
@@ -33,11 +48,10 @@ def bandpass(wavdata, sample_rate):
 def wiener_filter(wavdata):
     return signal.wiener(wavdata)
 
-# Short Sound Removal process is legacy content, future improvement may look into employing them to refine model
 def short_sound_removal(wavdata, pwa_volume, smoothing_factor, sample_rate):
     # pwa_volume -- average volume of the previous 5sec clip.
     # smoothing factor -- float between 0 and 1, 0.3 is empirically tested to be best
-    volume = ((sum([abs(x) for x in wavdata]))/len(wavdata))
+    volume = average_decibel_calc(wavdata)
     refnoise = smoothing_factor*volume - (1-smoothing_factor)*pwa_volume
     # Then scan for segments greater than 300ms of nonzeros
     final_sounds = get_long_sounds(wavdata, refnoise, 0.3, sample_rate)
@@ -46,26 +60,36 @@ def short_sound_removal(wavdata, pwa_volume, smoothing_factor, sample_rate):
 def get_long_sounds(samples, threshold, min_duration, sample_rate):
     # min_duration in seconds
     # Find all non-ambient samples
-    non_ambient = np.where(samples > threshold, samples, 0)
+    #print("Length of sample with environmental: %f", len(samples))
+    filterout = np.power(10, threshold*1.3/20)
+    print(filterout)
+    non_ambient = np.where(abs(samples) > filterout, samples, 0)
+    #print("Length of sample without environmental: %f", len(test_non_ambient))
+    ########################################################
+    # Short sound removal.  Instead, just get rid of quiet content
     longer_than = min_duration*sample_rate
     found = False
     start = 0
+    window_length = 1
     long_sounds = list()
-    for i in range(len(non_ambient)):
+    for i in range(window_length, len(non_ambient)+1, window_length):
         #New start
-        if (abs(non_ambient[i]) > 0) and (not found):
-            start = i
+        if (average_decibel_calc(non_ambient[i-window_length+1:i]) > 0) and (not found):
+            start = i-window_length+1
             found = True
-        #Have started, found a 0 after threshold
-        elif (abs(non_ambient[i]) == 0) and (i-start >= longer_than) and (found):
+        #Have started, found quiet after long enough time
+        elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start >= longer_than) and (found):
             found = False
             #record the sound
-            long_sounds.append(np.array(non_ambient[start:i-1]))
+            long_sounds.append(np.array(non_ambient[start:i-window_length]))
         #Have started, found a 0 before threshold
-        elif (abs(non_ambient[i]) == 0) and (i-start < longer_than) and (found):
+        elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start < longer_than) and (found):
             found = False
-    
-    return long_sounds
+    ##############################################################
+    # Grab last clip
+    if found and (len(non_ambient) - start >= longer_than):
+        long_sounds.append(np.array(non_ambient[start:len(non_ambient)-1]))
+    return non_ambient
 
 def splitter(wavdata, sample_rate):
     # read
@@ -129,8 +153,8 @@ def compute_spectral_rolloff(fourier, sample_rate):
 
 
 def compute_spectral_centroid(clip, sample_rate):
-    magnitudes = np.abs(np.fft.rfft(clip))  # Compute the magnitude spectrum
-    freqs = np.fft.rfftfreq(len(clip), d=1/sample_rate)  # Compute the frequency bins
+    magnitudes = np.abs(np.fft.rfft(clip, n=441))  # Compute the magnitude spectrum
+    freqs = np.fft.rfftfreq(n=441, d=1/sample_rate)  # Compute the frequency bins
     return np.sum(magnitudes * freqs) / np.sum(magnitudes)  # Compute the weighted average of frequency bins
 
 def compute_spectral_flux(fourier_curr, fourier_prev):
@@ -147,9 +171,7 @@ def compute_spectral_flux(fourier_curr, fourier_prev):
 
 # Data Driver
 def collect_data(wavname, ref_noise=0):
-    sample_rate, wavdata = wav.read(wavname)
-    if wavdata.ndim > 1:
-        wavdata = np.mean(wavdata, axis=1)
+    sample_rate, wavdata = mono_read(wavname)
     #filter the audio bandpass
     bandpass_wav = bandpass(wavdata, sample_rate)
     #Wiener filter
@@ -158,41 +180,41 @@ def collect_data(wavname, ref_noise=0):
     #######################
     #Remove short sounds
     #Comments left in case future improvements are made
-    # candidates = short_sound_removal(wiener, ref_noise, 0.3, sample_rate)
-    # if (len(candidates) != 0):
-    #     print("CANDIDATES!!!")
-    # else:
-    #     return (0, 0, 0, 0, 0, 0)
-    
+    candidates = short_sound_removal(wiener, ref_noise, 0.3, sample_rate)
+    print(candidates)
+    if (len(candidates) == 0):
+        return (10000, 10000, 10000, 10000, 10000, 10000)
+        
     ##################################
     features = list() #stores for each clip
     #Preprocessing of original audio complete, begin splitting and feature definition.
     #for candidate in candidates:
-
     #split into 10ms sections, make sure only 500
-    splits = splitter(wiener, sample_rate)[:500]
-    #take fourier of first clip for flux purposes
-    prev_fourier = librosa.stft(splits[0])
-    min_prev = min(prev_fourier)
-    max_prev = max(prev_fourier)
-    prev_fourier = [(x-min_prev/(max_prev-min_prev)) for x in prev_fourier]
-    #start at second clip for flux purposes
-    for clip in splits[1:]:
-        fourier = np.fft.rfft(clip, n=441)
-        min_fourier = min(fourier)
-        max_fourier = max(fourier)
-        if max_fourier-min_fourier == 0:
-            normalized_fourier = np.zeros(len(fourier))
+    splits = splitter(candidates, sample_rate)
+    if len(splits) > 1:
+        #take fourier of first clip for flux purposes
+        prev_fourier = np.fft.rfft(splits[0], n=441)
+        max_prev = max(prev_fourier)
+        if max_prev == 0:
+            prev_fourier = np.zeros(len(prev_fourier))
         else:
-            normalized_fourier = [(x-min_fourier/(max_fourier-min_fourier)) for x in fourier]
-        # Calculate the decibel levels for the clip
-        db = librosa.amplitude_to_db(np.abs(clip), ref=np.max)
-        # Calculate the histogram of the decibel levels
-        hist, bins = np.histogram(db, bins='auto', density=True)
-        features.append(np.array([compute_entropy(hist), compute_signal_energy(hist), compute_zero_cross(hist), compute_spectral_rolloff(fourier, sample_rate), compute_spectral_centroid(fourier, sample_rate), compute_spectral_flux(normalized_fourier, prev_fourier)]))
-
-        #save for next clips flux
-        prev_fourier = normalized_fourier
+            prev_fourier = [(x/max_prev) for x in prev_fourier]
+        #start at second clip for flux purposes
+        for clip in splits[1:]:
+            fourier = np.fft.rfft(clip, n=441)
+            max_fourier = max(fourier)
+            if max_fourier == 0:
+                normalized_fourier = np.zeros(len(fourier))
+            else:
+                normalized_fourier = [(x/max_fourier) for x in fourier]
+            # Calculate the decibel levels for the clip
+            db = librosa.amplitude_to_db(np.abs(clip), ref=np.max)
+            # Calculate the histogram of the decibel levels
+            hist, bins = np.histogram(db, bins='auto', density=True)
+            features.append(np.array([compute_entropy(hist), compute_signal_energy(hist), compute_zero_cross(hist), compute_spectral_rolloff(fourier, sample_rate), 
+                                    compute_spectral_centroid(fourier, sample_rate), compute_spectral_flux(normalized_fourier, prev_fourier)]))
+            #save for next clips flux
+            prev_fourier = normalized_fourier
 
     # For entropy, ZCT, Roll Off, Centroid, compute SD
     std_entropy = np.std([clip_features[0] for clip_features in features])
@@ -215,11 +237,17 @@ model = load('model.joblib')
 # Begin cycle
 while True:
     os.system("arecord -D plughw:1 -c2 -r 44100 -f FLOAT_LE -t wav -V stereo --duration=5 -v a.wav")
-    time.sleep(2)
+    time.sleep(1)
     reading_file = "a.wav"
-    print(collect_data(reading_file))
-    if (model.predict(np.array(collect_data(reading_file)).reshape(1,-1)) == 1):
+    score_tuple = collect_data(reading_file)
+    if score_tuple == (10000, 10000, 10000, 10000, 10000, 10000):
+        print("nada")
+    elif ((model.predict(score_tuple).reshape(1,-1)) == 1):
         print("possible causalty")
     else:
         print("nada")
-    time.sleep(0.01)
+    print("To begin again, type go and hit enter.")
+    input1 = input()
+    while(input1 != "go"):
+        input1 = input
+
