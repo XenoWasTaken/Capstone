@@ -14,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from joblib import dump, load
 import time
-import math
+from pydub import AudioSegment
 
 #########################################
 # Reading
@@ -67,28 +67,28 @@ def get_long_sounds(samples, threshold, min_duration, sample_rate):
     #print("Length of sample without environmental: %f", len(test_non_ambient))
     ########################################################
     # Short sound removal.  Instead, just get rid of quiet content
-    longer_than = min_duration*sample_rate
-    found = False
-    start = 0
-    window_length = 1
-    long_sounds = list()
-    for i in range(window_length, len(non_ambient)+1, window_length):
-        #New start
-        if (average_decibel_calc(non_ambient[i-window_length+1:i]) > 0) and (not found):
-            start = i-window_length+1
-            found = True
-        #Have started, found quiet after long enough time
-        elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start >= longer_than) and (found):
-            found = False
-            #record the sound
-            long_sounds.append(np.array(non_ambient[start:i-window_length]))
-        #Have started, found a 0 before threshold
-        elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start < longer_than) and (found):
-            found = False
-    ##############################################################
-    # Grab last clip
-    if found and (len(non_ambient) - start >= longer_than):
-        long_sounds.append(np.array(non_ambient[start:len(non_ambient)-1]))
+    # longer_than = min_duration*sample_rate
+    # found = False
+    # start = 0
+    # window_length = 1
+    # long_sounds = list()
+    # for i in range(window_length, len(non_ambient)+1, window_length):
+    #     #New start
+    #     if (average_decibel_calc(non_ambient[i-window_length+1:i]) > 0) and (not found):
+    #         start = i-window_length+1
+    #         found = True
+    #     #Have started, found quiet after long enough time
+    #     elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start >= longer_than) and (found):
+    #         found = False
+    #         #record the sound
+    #         long_sounds.append(np.array(non_ambient[start:i-window_length]))
+    #     #Have started, found a 0 before threshold
+    #     elif (average_decibel_calc(non_ambient[i-window_length+1:i]) < 0) and (i-start < longer_than) and (found):
+    #         found = False
+    # ##############################################################
+    # # Grab last clip
+    # if found and (len(non_ambient) - start >= longer_than):
+    #     long_sounds.append(np.array(non_ambient[start:len(non_ambient)-1]))
     return non_ambient
 
 def splitter(wavdata, sample_rate):
@@ -183,7 +183,7 @@ def collect_data(wavname, ref_noise=0):
     candidates = short_sound_removal(wiener, ref_noise, 0.3, sample_rate)
     print(candidates)
     if (len(candidates) == 0):
-        return (10000, 10000, 10000, 10000, 10000, 10000)
+        return [10000, 10000, 10000, 10000, 10000, 10000]
         
     ##################################
     features = list() #stores for each clip
@@ -211,7 +211,7 @@ def collect_data(wavname, ref_noise=0):
             db = librosa.amplitude_to_db(np.abs(clip), ref=np.max)
             # Calculate the histogram of the decibel levels
             hist, bins = np.histogram(db, bins='auto', density=True)
-            features.append(np.array([compute_entropy(hist), compute_signal_energy(hist), compute_zero_cross(hist), compute_spectral_rolloff(fourier, sample_rate), 
+            features.append(np.array([compute_entropy(hist), compute_signal_energy(clip), compute_zero_cross(clip), compute_spectral_rolloff(fourier, sample_rate), 
                                     compute_spectral_centroid(fourier, sample_rate), compute_spectral_flux(normalized_fourier, prev_fourier)]))
             #save for next clips flux
             prev_fourier = normalized_fourier
@@ -226,7 +226,7 @@ def collect_data(wavname, ref_noise=0):
     std_sig_nrg = np.std([clip_features[1] for clip_features in features])
     std_flux = np.std([clip_features[5] for clip_features in features])
     #Features prepped for SVM
-    return (std_entropy, std_sig_nrg, std_ZCT, std_rolloff, std_centroid, std_flux)
+    return np.array([std_entropy, std_sig_nrg, std_ZCT, std_rolloff, std_centroid, std_flux])
         
 #########################################
 
@@ -235,19 +235,29 @@ def collect_data(wavname, ref_noise=0):
 model = load('model.joblib')
 
 # Begin cycle
+
+print("Initializing")
+time.sleep(1)
+#os.system("arecord -D plughw:1 -c2 -r 44100 -f FLOAT_LE -t wav -V stereo --duration=5 -v a.wav")
+time.sleep(1)
+redo = AudioSegment.from_file("a.wav")
+redo.export("b.wav", format='wav')
+sample_rate, ambdata = mono_read("b.wav")
+ambient_vol = average_decibel_calc(ambdata)
 while True:
-    os.system("arecord -D plughw:1 -c2 -r 44100 -f FLOAT_LE -t wav -V stereo --duration=5 -v a.wav")
+    #os.system("arecord -D plughw:1 -c2 -r 44100 -f FLOAT_LE -t wav -V stereo --duration=5 -v a.wav")
     time.sleep(1)
-    reading_file = "a.wav"
-    score_tuple = collect_data(reading_file)
-    if score_tuple == (10000, 10000, 10000, 10000, 10000, 10000):
+    redo = AudioSegment.from_file("a.wav")
+    redo.export("b.wav", format='wav')
+    score_tuple = collect_data("home_silence/train_117.wav", ambient_vol)
+    if (all([x==10000 for x in score_tuple])):
         print("nada")
-    elif ((model.predict(score_tuple).reshape(1,-1)) == 1):
+    elif ((model.predict(score_tuple.reshape(1, -1))) == 1):
         print("possible causalty")
     else:
         print("nada")
     print("To begin again, type go and hit enter.")
     input1 = input()
     while(input1 != "go"):
-        input1 = input
+        input1 = input()
 
